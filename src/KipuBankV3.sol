@@ -7,8 +7,45 @@ pragma solidity 0.8.26;
  * @notice Banking system with Uniswap V2 integration for automatic token swaps to USDC
  * @dev Supports ETH deposits, ERC20 token deposits with auto-swap, and withdrawal functionality
  * @custom:security-contact security@kipubank.com
- * @custom:academic-work Trabajo Final Módulo 4 - 2025-S2-EDP-HENRY-M4
+ * @custom:academic-work Trabajo Final Módulo 5 - 2025-S2-EDP-HENRY-M5-HARDENED
  */
+
+/*//////////////////////////////////////////////////////////////
+                        SECURITY IMPORTS
+//////////////////////////////////////////////////////////////*/
+
+/// @dev Reentrancy protection
+abstract contract ReentrancyGuard {
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _status;
+    
+    constructor() {
+        _status = _NOT_ENTERED;
+    }
+    
+    modifier nonReentrant() {
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+}
+
+/// @dev Precision math library
+library PrecisionMath {
+    uint256 constant PRECISION = 1e18;
+    
+    function mulDiv(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
+        require(denominator > 0, "Division by zero");
+        return (a * b + denominator / 2) / denominator;
+    }
+    
+    function mulDivUp(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256) {
+        require(denominator > 0, "Division by zero");
+        return (a * b + denominator - 1) / denominator;
+    }
+}
 
 /*//////////////////////////////////////////////////////////////
                         OWNABLE IMPLEMENTATION
@@ -173,8 +210,9 @@ interface IUniswapV2Pair {
                         MAIN CONTRACT
 //////////////////////////////////////////////////////////////*/
 
-contract KipuBankV3 is Ownable {
+contract KipuBankV3 is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using PrecisionMath for uint256;
 
     /*//////////////////////////////////////////////////////////////
                         TYPE DECLARATIONS
@@ -202,13 +240,31 @@ contract KipuBankV3 is Ownable {
     
     /// @notice Emergency pause state
     bool public isPaused;
+    
+    /// @notice Last valid prices for circuit breaker
+    mapping(address => uint256) private lastValidPrice;
+    
+    /// @notice Last price update timestamps
+    mapping(address => uint256) private lastPriceUpdate;
+    
+    /// @notice Daily withdrawal limits per user
+    mapping(address => mapping(uint256 => uint256)) public dailyWithdrawals;
+    
+    /// @notice Maximum single deposit limit (in USDC)
+    uint256 public constant MAX_SINGLE_DEPOSIT = 50000 * 10**6; // 50,000 USDC
+    
+    /// @notice Maximum daily withdrawal per user (in USDC)
+    uint256 public constant MAX_DAILY_WITHDRAWAL = 100000 * 10**6; // 100,000 USDC
+    
+    /// @notice Maximum price change percentage (10% = 1000)
+    uint256 public constant MAX_PRICE_CHANGE_BPS = 1000;
 
     /*//////////////////////////////////////////////////////////////
                     CONSTANTS & IMMUTABLES
     //////////////////////////////////////////////////////////////*/
     
-    /// @notice Maximum bank capacity - 100 ETH equivalent in wei
-    uint256 private constant MAX_CAP = 100000000000000000000;
+    /// @notice Maximum bank capacity - 100,000 USDC (6 decimals)
+    uint256 private constant MAX_CAP = 100000000000; // 100,000 USDC with 6 decimals
     
     /// @notice Wei to Gwei conversion factor
     uint256 private constant WEI_TO_GWEI = 1000000000;
@@ -245,12 +301,12 @@ contract KipuBankV3 is Ownable {
     /// @notice Emitted when user makes a deposit
     /// @param user User address
     /// @param usdcAmount USDC equivalent amount
-    /// @param ethAmount Original token amount (for ETH) or 0 for ERC20
+    /// @param tokenAmount Original token amount
     /// @param timestamp Block timestamp
     event Deposit(
         address indexed user, 
         uint256 usdcAmount, 
-        uint256 ethAmount, 
+        uint256 tokenAmount, 
         uint256 timestamp
     );
     
@@ -343,10 +399,10 @@ contract KipuBankV3 is Ownable {
         uniswapRouter = _uniswapRouter;
         uniswapFactory = IUniswapV2Router02(_uniswapRouter).factory();
 
-        // Minimal initialization to avoid gas issues
-        currentUSDCBalance = 1;
-        currentETHBalance = 1; 
-        currentCapUSDC = 1;
+        // Initialize state variables to 0
+        currentUSDCBalance = 0;
+        currentETHBalance = 0; 
+        currentCapUSDC = 0;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -437,34 +493,40 @@ contract KipuBankV3 is Ownable {
     //////////////////////////////////////////////////////////////*/
     
     /**
-     * @notice Deposit native ETH to the bank
-     * @dev Converts ETH to USDC equivalent using Chainlink oracle and respects bank cap
+     * @notice Deposit native ETH to the bank with enhanced security
+     * @dev Converts ETH to USDC equivalent using Chainlink oracle and respects all limits
      */
-    function depositETH() external payable {
+    function depositETH() external payable nonReentrant {
         if (isPaused) revert Paused();
         if (msg.value == 0) revert ZeroAmount();
 
         // Cache state variables (single SLOAD pattern)
         uint256 cachedUSDCBalance = currentUSDCBalance;
         uint256 cachedETHBalance = currentETHBalance;
+        uint256 cachedCapUSDC = currentCapUSDC;
         address userAddr = msg.sender;
         uint256 userBalance = userDepositUSDC[userAddr];
 
         // Convert ETH to USDC equivalent
         uint256 usdcEquivalent = _convertToUSDC(address(0), msg.value);
         
+        // Check deposit limits
+        _checkDepositLimit(usdcEquivalent);
+        
         // Check bank capacity constraint
-        uint256 newTotalUSDC = cachedUSDCBalance + usdcEquivalent;
-        if (newTotalUSDC > MAX_CAP) revert CapExceeded();
+        uint256 newCapUSDC = cachedCapUSDC + usdcEquivalent;
+        if (newCapUSDC > MAX_CAP) revert CapExceeded();
 
         // Calculate new balances
         uint256 newUserBalance = userBalance + usdcEquivalent;
+        uint256 newTotalUSDC = cachedUSDCBalance + usdcEquivalent;
         uint256 newETHBalance = cachedETHBalance + msg.value;
 
         // Update state (single SSTORE pattern)
         userDepositUSDC[userAddr] = newUserBalance;
         currentUSDCBalance = newTotalUSDC;
         currentETHBalance = newETHBalance;
+        currentCapUSDC = newCapUSDC;
 
         emit Deposit(userAddr, usdcEquivalent, msg.value, block.timestamp);
     }
@@ -490,7 +552,7 @@ contract KipuBankV3 is Ownable {
 
         // Cache state variables (single SLOAD pattern)
         uint256 cachedUSDCBalance = currentUSDCBalance;
-        uint256 cachedETHBalance = currentETHBalance;
+        uint256 cachedCapUSDC = currentCapUSDC;
         address userAddr = msg.sender;
         uint256 userBalance = userDepositUSDC[userAddr];
 
@@ -508,17 +570,17 @@ contract KipuBankV3 is Ownable {
         }
 
         // Check bank capacity with final USDC amount
-        uint256 newTotalUSDC = cachedUSDCBalance + usdcAmount;
-        if (newTotalUSDC > MAX_CAP) revert CapExceeded();
+        uint256 newCapUSDC = cachedCapUSDC + usdcAmount;
+        if (newCapUSDC > MAX_CAP) revert CapExceeded();
 
         // Calculate new balances
         uint256 newUserBalance = userBalance + usdcAmount;
-        uint256 newETHBalance = cachedETHBalance + 1; // Increment for tracking
+        uint256 newTotalUSDC = cachedUSDCBalance + usdcAmount;
 
         // Update state (single SSTORE pattern)
         userDepositUSDC[userAddr] = newUserBalance;
         currentUSDCBalance = newTotalUSDC;
-        currentETHBalance = newETHBalance;
+        currentCapUSDC = newCapUSDC;
 
         emit Deposit(userAddr, usdcAmount, amount, block.timestamp);
     }
@@ -528,74 +590,74 @@ contract KipuBankV3 is Ownable {
     //////////////////////////////////////////////////////////////*/
     
     /**
-     * @notice Withdraw ETH from user's balance
+     * @notice Withdraw ETH from user's balance with reentrancy protection
      * @param usdcAmount USDC equivalent amount to withdraw
-     * @dev Converts USDC amount to ETH equivalent and transfers ETH
+     * @dev Converts USDC amount to ETH equivalent and transfers ETH following CEI pattern
      */
-    function withdrawETH(uint256 usdcAmount) external {
+    function withdrawETH(uint256 usdcAmount) external nonReentrant {
         if (isPaused) revert Paused();
         if (usdcAmount == 0) revert ZeroAmount();
 
-        // Convert USDC amount to ETH equivalent
-        uint256 ethEquivalent = _convertToUSDC(address(0), usdcAmount);
-        
         // Cache state variables  
         address userAddr = msg.sender;
         uint256 userBalance = userDepositUSDC[userAddr];
         uint256 cachedETHBalance = currentETHBalance;
+        uint256 cachedUSDCBalance = currentUSDCBalance;
         uint256 cachedCapUSDC = currentCapUSDC;
 
-        // Validate withdrawal limits and balance
-        if (usdcAmount > WEI_TO_GWEI * ethEquivalent) revert LimitExceeded();
+        // CHECKS: Validate all conditions first
         if (usdcAmount > userBalance) revert InsufficientBal();
+        
+        // Check daily withdrawal limits
+        _checkDailyLimit(userAddr, usdcAmount);
 
-        // Calculate new balances
-        uint256 newUserBalance = userBalance - usdcAmount;
-        uint256 newETHBalance = cachedETHBalance - ethEquivalent;
-        uint256 newCapUSDC = cachedCapUSDC - usdcAmount;
+        // Convert USDC amount to ETH equivalent
+        uint256 ethEquivalent = _convertFromUSDC(address(0), usdcAmount);
+        
+        // Validate ETH availability
+        if (ethEquivalent > cachedETHBalance) revert InsufficientBal();
 
-        // Update state
-        userDepositUSDC[userAddr] = newUserBalance;
-        currentETHBalance = newETHBalance;
-        currentCapUSDC = newCapUSDC;
+        // EFFECTS: Update all state variables before external calls
+        userDepositUSDC[userAddr] = userBalance - usdcAmount;
+        currentETHBalance = cachedETHBalance - ethEquivalent;
+        currentUSDCBalance = cachedUSDCBalance - usdcAmount;
+        currentCapUSDC = cachedCapUSDC - usdcAmount;
 
         emit Withdrawal(userAddr, ethEquivalent, block.timestamp);
         
-        // Transfer ETH to user
+        // INTERACTIONS: External calls at the end
         _transferETH(userAddr, ethEquivalent);
     }
 
     /**
-     * @notice Withdraw USDC from user's balance
+     * @notice Withdraw USDC from user's balance with reentrancy protection
      * @param usdcAmount Amount of USDC to withdraw
-     * @dev Direct USDC transfer to user
+     * @dev Direct USDC transfer to user following CEI pattern
      */
-    function withdrawUSDC(uint256 usdcAmount) external {
+    function withdrawUSDC(uint256 usdcAmount) external nonReentrant {
         if (isPaused) revert Paused();
         if (usdcAmount == 0) revert ZeroAmount();
 
         // Cache state variables
         address userAddr = msg.sender;
         uint256 userBalance = userDepositUSDC[userAddr];
-        uint256 cachedETHBalance = currentETHBalance;
+        uint256 cachedUSDCBalance = currentUSDCBalance;
         uint256 cachedCapUSDC = currentCapUSDC;
 
-        // Validate balance
+        // CHECKS: Validate all conditions first
         if (usdcAmount > userBalance) revert InsufficientBal();
+        
+        // Check daily withdrawal limits
+        _checkDailyLimit(userAddr, usdcAmount);
 
-        // Calculate new balances
-        uint256 newUserBalance = userBalance - usdcAmount;
-        uint256 newETHBalance = cachedETHBalance - 1; // Decrement for tracking
-        uint256 newCapUSDC = cachedCapUSDC - usdcAmount;
-
-        // Update state
-        userDepositUSDC[userAddr] = newUserBalance;
-        currentETHBalance = newETHBalance;
-        currentCapUSDC = newCapUSDC;
+        // EFFECTS: Update state before external calls
+        userDepositUSDC[userAddr] = userBalance - usdcAmount;
+        currentUSDCBalance = cachedUSDCBalance - usdcAmount;
+        currentCapUSDC = cachedCapUSDC - usdcAmount;
 
         emit Withdrawal(userAddr, usdcAmount, block.timestamp);
         
-        // Transfer USDC to user
+        // INTERACTIONS: External calls at the end
         IERC20(usdcAddress).safeTransfer(userAddr, usdcAmount);
     }
 
@@ -683,6 +745,32 @@ contract KipuBankV3 is Ownable {
     //////////////////////////////////////////////////////////////*/
     
     /**
+     * @notice Check daily withdrawal limits for user
+     * @param user User address
+     * @param amount Amount to withdraw (USDC)
+     */
+    function _checkDailyLimit(address user, uint256 amount) internal {
+        uint256 today = block.timestamp / 1 days;
+        uint256 dailyTotal = dailyWithdrawals[user][today] + amount;
+        
+        if (dailyTotal > MAX_DAILY_WITHDRAWAL) {
+            revert LimitExceeded();
+        }
+        
+        dailyWithdrawals[user][today] = dailyTotal;
+    }
+    
+    /**
+     * @notice Check single deposit limit
+     * @param amount Amount to deposit (USDC equivalent)
+     */
+    function _checkDepositLimit(uint256 amount) internal pure {
+        if (amount > MAX_SINGLE_DEPOSIT) {
+            revert LimitExceeded();
+        }
+    }
+    
+    /**
      * @notice Check if token has Uniswap V2 pair with USDC
      * @param token Token address to check
      * @return True if token can be swapped to USDC
@@ -695,32 +783,60 @@ contract KipuBankV3 is Ownable {
     }
 
     /**
-     * @notice Get latest price from Chainlink oracle with staleness check
+     * @notice Get latest price from Chainlink oracle with comprehensive security checks
      * @param priceFeed Chainlink price feed address
      * @return Latest price (8 decimals)
      */
-    function _getLatestPrice(address priceFeed) internal view returns (uint256) {
-        (, int256 price, , uint256 timeStamp, ) = AggregatorV3Interface(priceFeed).latestRoundData();
+    function _getLatestPrice(address priceFeed) internal returns (uint256) {
+        (uint80 roundId, int256 price, , uint256 timeStamp, uint80 answeredInRound) = 
+            AggregatorV3Interface(priceFeed).latestRoundData();
+        
+        // Basic validations
         if (price <= 0) revert InvalidPrice();
+        if (timeStamp == 0) revert InvalidPrice();
+        if (block.timestamp < timeStamp) revert InvalidPrice(); // Prevent future timestamps
         if (block.timestamp - timeStamp > 3600) revert StalePrice(); // 1 hour max age
-        return uint256(price);
+        if (answeredInRound < roundId) revert StalePrice(); // Additional staleness check
+        
+        uint256 currentPrice = uint256(price);
+        uint256 storedLastPrice = lastValidPrice[priceFeed];
+        
+        // Circuit breaker: check for extreme price movements
+        if (storedLastPrice != 0) {
+            uint256 priceDiff = currentPrice > storedLastPrice 
+                ? currentPrice - storedLastPrice 
+                : storedLastPrice - currentPrice;
+            
+            uint256 maxChange = (storedLastPrice * MAX_PRICE_CHANGE_BPS) / 10000;
+            if (priceDiff > maxChange) {
+                // Use last valid price if change is too extreme
+                return storedLastPrice;
+            }
+        }
+        
+        // Update last valid price
+        lastValidPrice[priceFeed] = currentPrice;
+        lastPriceUpdate[priceFeed] = block.timestamp;
+        
+        return currentPrice;
     }
 
     /**
-     * @notice Convert token amount to USDC equivalent using oracles
+     * @notice Convert token amount to USDC equivalent using oracles with precision math
      * @param token Token address (address(0) for ETH)
      * @param amount Token amount to convert
      * @return USDC equivalent amount (6 decimals)
      */
-    function _convertToUSDC(address token, uint256 amount) internal view returns (uint256) {
+    function _convertToUSDC(address token, uint256 amount) internal returns (uint256) {
         if (token == address(0)) {
             // ETH to USDC conversion
             TokenInfo memory ethInfo = supportedTokens[address(0)];
             if (!ethInfo.isSupported) revert NotSupported();
 
             uint256 ethPrice = _getLatestPrice(ethInfo.priceFeed);
-            // ETH (18 decimals) * Price (8 decimals) / 1e18 / 1e8 * 1e6 = USDC (6 decimals)
-            return (amount * ethPrice * 1000000) / (1000000000000000000 * 100000000);
+            // ETH (18 decimals) * Price (8 decimals) → USDC (6 decimals)
+            // Use precision math to avoid rounding errors
+            return PrecisionMath.mulDiv(amount, ethPrice, 1e20);
         }
 
         TokenInfo memory tokenInfo = supportedTokens[token];
@@ -728,13 +844,45 @@ contract KipuBankV3 is Ownable {
 
         uint256 tokenPrice = _getLatestPrice(tokenInfo.priceFeed);
 
-        // Handle different decimal conversions to USDC (6 decimals)
+        // Handle different decimal conversions to USDC (6 decimals) with precision
         if (tokenInfo.decimals > 6) {
-            uint256 divisor = 10 ** (tokenInfo.decimals - 6);
-            return (amount * tokenPrice * 100000000) / (divisor * 100000000);
+            uint256 divisor = 10 ** (tokenInfo.decimals - 6 + 8);
+            return PrecisionMath.mulDiv(amount, tokenPrice, divisor);
         } else {
             uint256 multiplier = 10 ** (6 - tokenInfo.decimals);  
-            return (amount * tokenPrice * multiplier * 100000000) / 100000000;
+            return PrecisionMath.mulDiv(amount * multiplier, tokenPrice, 1e8);
+        }
+    }
+
+    /**
+     * @notice Convert USDC amount to token equivalent using oracles with precision math
+     * @param token Token address (address(0) for ETH)
+     * @param usdcAmount USDC amount to convert (6 decimals)
+     * @return Token equivalent amount
+     */
+    function _convertFromUSDC(address token, uint256 usdcAmount) internal returns (uint256) {
+        if (token == address(0)) {
+            // USDC to ETH conversion
+            TokenInfo memory ethInfo = supportedTokens[address(0)];
+            if (!ethInfo.isSupported) revert NotSupported();
+
+            uint256 ethPrice = _getLatestPrice(ethInfo.priceFeed);
+            // USDC (6 decimals) → ETH (18 decimals)
+            return PrecisionMath.mulDiv(usdcAmount, 1e20, ethPrice);
+        }
+
+        TokenInfo memory tokenInfo = supportedTokens[token];
+        if (!tokenInfo.isSupported) revert NotSupported();
+
+        uint256 tokenPrice = _getLatestPrice(tokenInfo.priceFeed);
+
+        // Handle different decimal conversions from USDC (6 decimals) with precision
+        if (tokenInfo.decimals > 6) {
+            uint256 multiplier = 10 ** (tokenInfo.decimals - 6 + 8);
+            return PrecisionMath.mulDiv(usdcAmount, multiplier, tokenPrice);
+        } else {
+            uint256 divisor = 10 ** (6 - tokenInfo.decimals);  
+            return PrecisionMath.mulDiv(usdcAmount, 1e8, tokenPrice * divisor);
         }
     }
 
@@ -806,21 +954,24 @@ contract KipuBankV3 is Ownable {
         // Cache state variables
         uint256 cachedUSDCBalance = currentUSDCBalance;
         uint256 cachedETHBalance = currentETHBalance;
+        uint256 cachedCapUSDC = currentCapUSDC;
 
         // Convert ETH to USDC equivalent
         uint256 usdcEquivalent = _convertToUSDC(address(0), msg.value);
         
         // Check bank capacity
-        uint256 newTotalUSDC = cachedUSDCBalance + usdcEquivalent;
-        if (newTotalUSDC > MAX_CAP) revert CapExceeded();
+        uint256 newCapUSDC = cachedCapUSDC + usdcEquivalent;
+        if (newCapUSDC > MAX_CAP) revert CapExceeded();
 
         // Update balances
         uint256 newUserBalance = userDepositUSDC[msg.sender] + usdcEquivalent;
+        uint256 newTotalUSDC = cachedUSDCBalance + usdcEquivalent;
         uint256 newETHBalance = cachedETHBalance + msg.value;
 
         userDepositUSDC[msg.sender] = newUserBalance;
         currentUSDCBalance = newTotalUSDC;
         currentETHBalance = newETHBalance;
+        currentCapUSDC = newCapUSDC;
 
         emit Deposit(msg.sender, usdcEquivalent, msg.value, block.timestamp);
     }

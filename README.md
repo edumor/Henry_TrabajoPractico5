@@ -1,551 +1,670 @@
-# KipuBankV3 Security Analysis & Improvements Report
+# KipuBankV3 - Advanced DeFi Banking System
 
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.26-blue)
-![Foundry](https://img.shields.io/badge/Foundry-tested-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
-![Security](https://img.shields.io/badge/Security-Enhanced-red)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Network](https://img.shields.io/badge/Network-Sepolia-orange)
 
-> **Academic Project**: Final Assessment Module 5 - 2025-S2-EDP-HENRY-M5  
-> **Author**: Eduardo Moreno - Ethereum Developers ETH_KIPU  
-> **Focus**: Pre-Audit Security Analysis & DevSecOps Implementation
+## 📋 Overview
 
-## 📋 Executive Summary
+**KipuBankV3** is an advanced DeFi banking system that extends KipuBankV2 functionality by integrating with **Uniswap V2** for automatic token swaps to USDC. The contract accepts any ERC20 token supported by Uniswap V2, automatically converts it to USDC, and credits the resulting amount to the user's balance while respecting the bank's maximum capacity.
 
-This repository contains a comprehensive security analysis and hardened implementation of **KipuBankV3**, a decentralized banking system with Uniswap V2 integration. The project demonstrates the application of **DevSecOps methodology** and **threat modeling** techniques learned in Module 5 of the Ethereum Developer Program.
+**Author**: Eduardo Moreno  
+**Academic Work**: Final Project Module 4 - 2025-S2-EDP-HENRY-M4  
+**Contract Address (Sepolia)**: `0xF8eD172b29c2CF2037b2d6A5C611C1cD26AbbA9e`
 
-### 🎯 Project Objectives
+## 🎯 Key Features
 
-- **Primary**: Conduct threat analysis and security hardening of KipuBankV3
-- **Secondary**: Implement comprehensive testing suite with security focus
-- **Tertiary**: Document findings and recommendations for production readiness
+### Core Functionality (From KipuBankV2)
+- ✅ **ETH Deposits**: Native Ethereum deposits with automatic USDC conversion
+- ✅ **USDC Deposits**: Direct USDC storage without conversion
+- ✅ **Withdrawal System**: Secure withdrawal mechanism for users
+- ✅ **Owner Controls**: Administrative functions for contract management
+- ✅ **Bank Cap Limit**: Maximum capacity enforcement (100 ETH equivalent)
+- ✅ **Chainlink Price Feeds**: Real-time price data for accurate conversions
 
----
+### New Features Added for TP4
+- 🆕 **Universal Token Support**: Accept any ERC20 token with Uniswap V2 pairs
+- 🆕 **Automatic Token Swaps**: Seamless integration with Uniswap V2 Router
+- 🆕 **Dynamic Token Configuration**: Add/remove supported tokens dynamically
+- 🆕 **Uniswap Pair Validation**: Automatic verification of token pairs existence
+- 🆕 **Advanced Error Handling**: Custom errors for better debugging
+- 🆕 **Gas Optimization**: Efficient storage and operations
+- 🆕 **Emergency Pause**: Circuit breaker for security
 
-## 🔍 Original Contract Analysis
+## 🏗️ Technical Architecture
 
-### Initial Architecture Overview
+### Smart Contract Structure
 
-**KipuBankV3** is a sophisticated DeFi protocol featuring:
-
-- **ETH Native Deposits** with automatic USDC conversion via Chainlink oracles
-- **ERC20 Token Support** with automated Uniswap V2 swaps to USDC
-- **Dual Withdrawal System** (ETH or USDC based on user preference)
-- **Capacity Management** with 100 ETH equivalent maximum limit
-- **Oracle Integration** using Chainlink price feeds for accurate conversions
-
-### Core Functionality Flow
-
-```mermaid
-graph TD
-    A[User Deposit] --> B{Token Type?}
-    B -->|ETH| C[Chainlink Price Feed]
-    B -->|ERC20| D{Is USDC?}
-    D -->|Yes| E[Direct Transfer]
-    D -->|No| F[Uniswap V2 Swap]
-    C --> G[Convert to USDC Equivalent]
-    F --> G
-    E --> G
-    G --> H[Update User Balance]
-    G --> I[Check Capacity Limit]
-    I -->|Valid| J[Complete Deposit]
-    I -->|Exceeded| K[Revert Transaction]
-```
-
----
-
-## 🚨 Identified Threat Vectors
-
-Based on **OWASP Smart Contract Top 10 (2025)** and **Module 5 Security Methodology**:
-
-### 1. 🎯 Price Oracle Manipulation (SC02:2025)
-
-**Threat Level**: 🔴 **HIGH**
-
-#### Attack Scenario
 ```solidity
-// Attacker exploits price volatility during low liquidity periods
-1. Monitor Chainlink price feeds for manipulation opportunities
-2. Execute flash loan to temporarily manipulate DEX prices
-3. Deposit ETH when price is artificially inflated
-4. Receive excessive USDC equivalent
-5. Restore market price and extract profit
-```
-
-#### Root Cause
-- **Single oracle dependency** without redundancy
-- **No price deviation checks** or circuit breakers
-- **Lack of Time-Weighted Average Price (TWAP)** validation
-
-#### Potential Impact
-- **Financial Loss**: Direct protocol fund drainage
-- **Market Manipulation**: Artificial price movements
-- **User Trust**: Erosion of protocol credibility
-
----
-
-### 2. 🔄 Reentrancy Vulnerabilities (SC05:2025)
-
-**Threat Level**: 🔴 **CRITICAL**
-
-#### Attack Scenario
-```solidity
-// Malicious contract exploits withdrawal process
-contract MaliciousReentrant {
-    function attack() external {
-        bank.depositETH{value: 1 ether}();
-        bank.withdrawETH(bank.getUserBalance(address(this)));
-    }
+contract KipuBankV3 is Ownable {
+    // Integration with Uniswap V2
+    IUniswapV2Router02 public immutable uniswapRouter;
+    IUniswapV2Factory public immutable uniswapFactory;
     
-    receive() external payable {
-        // Reenter before state update
-        if (msg.sender == address(bank)) {
-            bank.withdrawETH(bank.getUserBalance(address(this)));
-        }
-    }
+    // Chainlink Price Feeds
+    address public immutable ethPriceFeed;
+    address public immutable usdcPriceFeed;
+    
+    // Token Configuration
+    mapping(address => TokenInfo) public supportedTokens;
+    
+    // User Balances (all in USDC)
+    mapping(address => uint256) public userDepositUSDC;
 }
 ```
 
-#### Root Cause
-- **Missing ReentrancyGuard** protection
-- **External calls before state updates** in some functions
-- **Insufficient checks-effects-interactions** pattern implementation
+### Key Integrations
 
-#### Potential Impact
-- **Complete Fund Drainage**: Total protocol insolvency
-- **User Fund Loss**: Legitimate user deposits at risk
-- **Protocol Shutdown**: Permanent operational failure
+1. **Uniswap V2 Router**: `0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008`
+2. **Chainlink ETH/USD**: `0x694AA1769357215DE4FAC081bf1f309aDC325306`
+3. **Chainlink USDC/USD**: `0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E`
+4. **USDC Token (Sepolia)**: `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
+
+## 📚 Function Reference
+
+### Core Banking Functions
+
+#### `depositETH()` - ETH Deposits
+```solidity
+function depositETH() external payable
+```
+- **Purpose**: Deposit native ETH and convert to USDC equivalent
+- **Requirements**: Amount > 0, contract not paused, within bank cap
+- **Process**: ETH → Price conversion → USDC balance update
+
+#### `depositToken(address token, uint256 amount)` - ERC20 Deposits
+```solidity
+function depositToken(address token, uint256 amount) external
+```
+- **Purpose**: Deposit any supported ERC20 token
+- **New Feature**: Automatic Uniswap V2 swap to USDC if not USDC
+- **Requirements**: Token must be supported, valid Uniswap pair exists
+- **Process**: Token → Uniswap Swap → USDC → Balance update
+
+#### `withdraw(uint256 amount)` - Withdrawals
+```solidity
+function withdraw(uint256 amount) external
+```
+- **Purpose**: Withdraw USDC equivalent in ETH
+- **Requirements**: Sufficient balance, contract not paused
+- **Process**: USDC balance → ETH conversion → Transfer
+
+### Administrative Functions
+
+#### `addToken(address token, uint8 decimals, address priceFeed)` - Add Token Support
+```solidity
+function addToken(address token, uint8 decimals, address priceFeed) external onlyOwner
+```
+- **New Feature**: Dynamically add new token support
+- **Requirements**: Valid token address, not already supported
+- **Purpose**: Expand supported token ecosystem
+
+#### `removeToken(address token)` - Remove Token Support
+```solidity
+function removeToken(address token) external onlyOwner
+```
+- **New Feature**: Remove token from supported list
+- **Purpose**: Manage token ecosystem security
+
+#### `pause() / unpause()` - Emergency Controls
+```solidity
+function pause() external onlyOwner
+function unpause() external onlyOwner
+```
+- **New Feature**: Emergency circuit breaker
+- **Purpose**: Security mechanism for unusual situations
+
+### View Functions
+
+#### `getBankInfo()` - Bank Status
+```solidity
+function getBankInfo() external view returns (...)
+```
+- **Returns**: Current balances, capacity, limits, pause state
+- **Purpose**: Complete bank status overview
+
+#### `getTokenConfig(address token)` - Token Information
+```solidity
+function getTokenConfig(address token) external view returns (...)
+```
+- **Returns**: Token support status, decimals, price feed
+- **Purpose**: Verify token configuration
+
+#### `hasUniswapPair(address token)` - Pair Validation
+```solidity
+function hasUniswapPair(address token) external view returns (bool)
+```
+- **New Feature**: Check if token has USDC pair on Uniswap
+- **Purpose**: Validate token compatibility
+
+#### `getSwapPreview(address tokenIn, address tokenOut)` - Preview Swaps
+```solidity
+function getSwapPreview(address tokenIn, address tokenOut) external view returns (uint256)
+```
+- **New Feature**: Preview swap amounts before execution
+- **Purpose**: User experience enhancement
+
+## 🧪 Testing Guide for Instructors
+
+### Contract Address
+**Sepolia Testnet**: `0xF8eD172b29c2CF2037b2d6A5C611C1cD26AbbA9e`  
+**Etherscan**: https://sepolia.etherscan.io/address/0xF8eD172b29c2CF2037b2d6A5C611C1cD26AbbA9e
+
+## 🔧 Contract Corrections Based on Instructor Feedback
+
+### Original Instructor Observations:
+1. **currentCapUSDC is deducted on withdrawals but never updated** - Could remain at 0 and not reflect the bank's actual capacity
+2. **Incorrect conversion in withdrawals** - `uint256 ethEquivalent = _convertToUSDC(address(0), usdcAmount)` should not convert to USDC, but to ETH
+3. **Decimal inconsistency in MAX_CAP** - MAX_CAP was in wei (18 decimals), but productive USDC has 6 decimals
+4. **Inconsistent ETH balance logic** - `currentETHBalance = cachedETHBalance + msg.value` adds real ETH, but in some places it incorrectly added +1
+
+### Implemented Corrections:
+
+#### 1. **Proper `currentCapUSDC` Update on Withdrawals**
+**Location**: Functions `withdrawETH()` (lines ~494-498) and `withdrawUSDC()` (lines ~518-522)  
+**Original Problem**: The `currentCapUSDC` variable was only incremented on deposits but never decremented on withdrawals, causing the bank's capacity limit to remain permanently occupied.
+
+**Implemented Solution**:
+```solidity
+// In withdrawETH()
+uint256 newCapUSDC = cachedCapUSDC - usdcAmount;
+currentCapUSDC = newCapUSDC;
+
+// In withdrawUSDC()
+uint256 newCapUSDC = cachedCapUSDC - usdcAmount;
+currentCapUSDC = newCapUSDC;
+```
+
+**Rationale**: Now `currentCapUSDC` updates bidirectionally: increases on deposits and decreases on withdrawals, correctly reflecting the bank's available capacity at all times.
 
 ---
 
-### 3. ⛽ Gas Limit DoS Attacks (SC10:2025)
+#### 2. **Fixed Conversion Direction in ETH Withdrawals**
+**Location**: Function `withdrawETH()` (line ~485)  
+**Original Problem**: Used `_convertToUSDC()` when it should convert from USDC to ETH for withdrawals.
 
-**Threat Level**: 🟡 **MEDIUM**
-
-#### Attack Scenario
+**Implemented Solution**:
 ```solidity
-// Attacker uses gas-expensive tokens to DoS the system
-1. Deploy token with expensive transfer hooks
-2. Create Uniswap V2 pair with target token
-3. Deposit gas-expensive token triggering costly swaps
-4. Consume block gas limit preventing other users' transactions
-5. Maintain DoS by continuous expensive operations
+// BEFORE (INCORRECT):
+uint256 ethEquivalent = _convertToUSDC(address(0), usdcAmount);
+
+// NOW (CORRECT):
+uint256 ethEquivalent = _convertFromUSDC(address(0), usdcAmount);
 ```
 
-#### Root Cause
-- **No gas limit checks** on external calls
-- **Unvalidated token behavior** during swaps
-- **Missing protection** against gas griefing
-
-#### Potential Impact
-- **Service Degradation**: Reduced protocol availability
-- **User Experience**: Transaction failures and delays
-- **Economic Loss**: Wasted gas fees without successful operations
+**Rationale**: The `_convertFromUSDC()` function performs the correct inverse conversion: takes a USDC amount and returns its ETH equivalent using Chainlink oracles, allowing users to withdraw the correct amount of ETH based on their USDC balance.
 
 ---
 
-### 4. 🔢 Arithmetic Precision Errors (SC08:2025)
+#### 3. **Fixed Decimal Places in MAX_CAP**
+**Location**: Constant `MAX_CAP` (line ~249)  
+**Original Problem**: `MAX_CAP` was defined in wei (18 decimals) but USDC uses 6 decimals, causing inconsistency in comparisons.
 
-**Threat Level**: 🟡 **MEDIUM**
-
-#### Attack Scenario
+**Implemented Solution**:
 ```solidity
-// Exploit rounding errors through micro-operations
-1. Analyze conversion functions for precision loss
-2. Execute multiple small deposits/withdrawals
-3. Accumulate favorable rounding errors
-4. Scale attack through automation
-5. Extract accumulated precision gains
+// BEFORE (INCORRECT):
+uint256 private constant MAX_CAP = 100 ether; // 18 decimals
+
+// NOW (CORRECT):
+uint256 private constant MAX_CAP = 100000000000; // 100,000 USDC with 6 decimals
 ```
 
-#### Root Cause
-```solidity
-// Vulnerable conversion logic
-return (amount * ethPrice * 1000000) / (1000000000000000000 * 100000000);
-// Division truncation can cause precision loss
-```
-
-#### Potential Impact
-- **Slow Fund Drainage**: Gradual protocol fund depletion
-- **Reserve Imbalance**: Skewed ETH/USDC ratios
-- **Detection Difficulty**: Hard to notice and trace
+**Rationale**: Since all capacities and balances are handled internally in USDC (6 decimals), `MAX_CAP` must use the same format. The value represents 100,000 USDC, equivalent to the original limit of ~100 ETH at current prices.
 
 ---
 
-## 🛡️ Security Enhancements Implemented
+#### 4. **Removed Incorrect ETH Balance Increments (+1)**
+**Location**: Multiple deposit and withdrawal functions  
+**Original Problem**: In some lines, `cachedETHBalance + 1` was added without logical justification, incorrectly altering the actual ETH balance.
 
-### Enhanced Contract: `KipuBankV3Secure.sol`
-
-#### 1. **Reentrancy Protection**
+**Implemented Solution**:
 ```solidity
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+// BEFORE (INCORRECT):
+currentETHBalance = cachedETHBalance + 1;
 
-contract KipuBankV3Secure is Ownable, ReentrancyGuard, Pausable {
-    function depositETH() 
-        external 
-        payable 
-        nonReentrant  // ✅ Reentrancy protection
-        whenNotPaused 
-        rateLimited 
-    {
-        // Implementation...
-    }
-}
+// NOW (CORRECT):
+currentETHBalance = cachedETHBalance + msg.value;  // On deposits
+currentETHBalance = cachedETHBalance - ethEquivalent;  // On withdrawals
 ```
 
-#### 2. **Oracle Security & Circuit Breakers**
+**Rationale**: Balances must reflect exactly the actual transferred amounts. On deposits, `msg.value` (received ETH) is added; on withdrawals, `ethEquivalent` (sent ETH) is subtracted. Any arbitrary adjustment (+1) would cause discrepancies between accounting balance and the contract's actual balance.
+
+---
+
+#### 5. **Explicit State Variable Initialization**
+**Location**: Constructor (lines ~368-370)  
+**Additional Improvement**: Ensured all state variables are explicitly initialized to 0.
+
+**Implementation**:
 ```solidity
-/// @notice Maximum price deviation allowed (10%)
-uint256 public constant MAX_PRICE_DEVIATION = 1000;
-
-/// @notice Maximum price change per hour (15%)
-uint256 public constant MAX_PRICE_CHANGE_PER_HOUR = 1500;
-
-modifier priceChangeValidation(address token, uint256 newPrice) {
-    TokenInfo storage tokenInfo = supportedTokens[token];
-    if (tokenInfo.lastValidPrice > 0) {
-        uint256 priceChange = calculatePriceDeviation(tokenInfo.lastValidPrice, newPrice);
-        if (priceChange > MAX_PRICE_CHANGE_PER_HOUR) {
-            emit CircuitBreakerTriggered(token, tokenInfo.lastValidPrice, newPrice, priceChange);
-            revert PriceChangeTooLarge();
-        }
-    }
-    _;
-}
+currentUSDCBalance = 0;
+currentETHBalance = 0; 
+currentCapUSDC = 0;
 ```
 
-#### 3. **Enhanced Input Validation**
-```solidity
-/// @notice Maximum single deposit (10 ETH equivalent)
-uint256 public constant MAX_SINGLE_DEPOSIT = 10_000_000; // 10 USDC
+**Rationale**: Although Solidity initializes variables to 0 by default, explicit initialization improves code clarity and guarantees a consistent and predictable initial state.
 
-modifier validTokenAmount(address token, uint256 amount) {
+---
+
+### Impact of Corrections:
+
+✅ **Proper capacity management**: The bank now releases capacity on withdrawals, allowing new deposits without permanently blocking the limit.
+
+✅ **Precise conversions**: Users withdraw the correct amount of ETH based on their USDC balance.
+
+✅ **Decimal consistency**: All capacity operations use the same base (6 decimals USDC).
+
+✅ **Exact accounting**: ETH balances reflect exactly the real transfers without arbitrary adjustments.
+
+✅ **Improved reliability**: The contract now correctly handles the complete deposit and withdrawal cycle without accounting discrepancies.
+
+## 👨‍🏫 Comprehensive Development Guide for Instructors
+
+### 🎯 Functions Implementation Analysis
+
+This section provides detailed analysis of **what** was implemented, **where** it's located in the code, and **why** each decision was made, specifically addressing TP4 requirements.
+
+#### 1. Universal Token Support Implementation
+
+**What**: Extended deposit functionality to accept any ERC20 token
+**Where**: `depositToken(address token, uint256 amount)` function (Lines ~400-500)
+**Why**: TP4 Requirement #1 - "Handle any token exchangeable in Uniswap V2"
+
+```solidity
+function depositToken(address token, uint256 amount) external {
+    // Validation: Check if paused, non-zero amount
+    if (isPaused) revert Paused();
     if (amount == 0) revert ZeroAmount();
-    if (amount > MAX_SINGLE_DEPOSIT) revert AmountExceedsMaximum();
-    if (token != address(0) && !supportedTokens[token].isSupported && !_isTokenSupported(token)) {
+    
+    // NEW: Dynamic token support check
+    TokenInfo memory tokenConfig = supportedTokens[token];
+    if (!tokenConfig.isSupported && !hasUniswapPair(token)) {
         revert NotSupported();
     }
-    _;
 }
 ```
 
-#### 4. **Rate Limiting Mechanism**
+**Key Innovation**: Dynamic validation that checks both pre-configured tokens AND real-time Uniswap pair existence.
+
+#### 2. Automatic Swap Integration (CORE TP4 FEATURE)
+
+**What**: Seamless integration with Uniswap V2 for automatic token-to-USDC conversion
+**Where**: `_swapTokenToUSDC(address token, uint256 amount)` internal function (Lines ~600-700)
+**Why**: TP4 Requirement #2 - "Execute swaps of tokens within the smart contract"
+
 ```solidity
-/// @notice Minimum time between operations (1 block)
-uint256 public constant MIN_TIME_BETWEEN_OPERATIONS = 1;
-
-mapping(address => uint256) public lastOperationBlock;
-
-modifier rateLimited() {
-    if (block.number <= lastOperationBlock[msg.sender] + MIN_TIME_BETWEEN_OPERATIONS) {
-        revert OperationTooFrequent();
+function _swapTokenToUSDC(address user, address token, uint256 amount) internal returns (uint256) {
+    // NEW: Automatic USDC detection - no swap needed
+    if (token == usdcAddress) {
+        return amount;
     }
-    _;
-    lastOperationBlock[msg.sender] = block.number;
+    
+    // NEW: Uniswap V2 integration for automatic swaps
+    address[] memory path = new address[](2);
+    path[0] = token;
+    path[1] = usdcAddress;
+    
+    // NEW: Real-time swap execution with slippage protection
+    uint256[] memory amounts = IUniswapV2Router02(uniswapRouter).swapExactTokensForTokens(
+        amount,
+        amountOutMin, // 5% slippage protection
+        path,
+        address(this),
+        deadline
+    );
+    
+    return amounts[1]; // Return USDC amount received
 }
 ```
 
-#### 5. **Enhanced Oracle Validation**
+**Key Innovation**: Conditional logic that handles USDC directly while automatically swapping other tokens.
+
+#### 3. Bank Cap Preservation (CRITICAL REQUIREMENT)
+
+**What**: Ensure total bank capacity never exceeds limits even after swaps
+**Where**: Throughout deposit functions with `_checkBankCapacity()` (Lines ~300-350)
+**Why**: TP4 Requirement #4 - "Respect the Bank Cap"
+
+```solidity
+function _checkBankCapacity(uint256 newUSDCAmount) internal view {
+    uint256 newTotalCapacity = currentCapUSDC + newUSDCAmount;
+    
+    // NEW: Dynamic capacity calculation including swap results
+    if (newTotalCapacity > MAX_CAP) {
+        revert CapExceeded();
+    }
+}
+```
+
+**Key Innovation**: Pre-swap validation ensures capacity limits are respected BEFORE executing swaps.
+
+#### 4. Dynamic Token Configuration System (NEW FEATURE)
+
+**What**: Runtime addition/removal of supported tokens
+**Where**: `addToken()` and `removeToken()` functions (Lines ~750-800)
+**Why**: Enhanced flexibility beyond basic TP4 requirements for real-world usage
+
+```solidity
+function addToken(address token, uint8 decimals, address priceFeed) external onlyOwner {
+    // NEW: Prevents duplicate token addition
+    if (supportedTokens[token].isSupported) {
+        revert AlreadySupported();
+    }
+    
+    // NEW: Structured token configuration
+    supportedTokens[token] = TokenInfo({
+        isSupported: true,
+        decimals: decimals,
+        priceFeed: priceFeed
+    });
+    
+    emit TokenAdded(token, decimals, priceFeed);
+}
+```
+
+**Key Innovation**: Prevents configuration conflicts and provides clear audit trail.
+
+#### 5. Uniswap Pair Validation (SAFETY FEATURE)
+
+**What**: Real-time verification of token pair existence on Uniswap
+**Where**: `hasUniswapPair(address token)` function (Lines ~850-880)
+**Why**: Prevents failed transactions and ensures swap compatibility
+
+```solidity
+function hasUniswapPair(address token) public view returns (bool) {
+    // NEW: Handle ETH as special case
+    if (token == address(0)) return true;
+    
+    // NEW: Query Uniswap factory for pair existence
+    address pair = IUniswapV2Factory(uniswapFactory).getPair(token, usdcAddress);
+    return pair != address(0);
+}
+```
+
+**Key Innovation**: Proactive validation prevents runtime failures and improves user experience.
+
+#### 6. Enhanced Price Feed Integration
+
+**What**: Robust price validation with staleness checks
+**Where**: `_getLatestPrice(address priceFeed)` function (Lines ~900-950)
+**Why**: Security and accuracy for financial calculations
+
 ```solidity
 function _getLatestPrice(address priceFeed) internal view returns (uint256) {
-    try AggregatorV3Interface(priceFeed).latestRoundData() returns (
-        uint80 roundId,
-        int256 price, 
-        uint256,  // startedAt
-        uint256 timeStamp,
-        uint80 answeredInRound
-    ) {
-        // Comprehensive validation
-        if (price <= 0) revert InvalidPrice();
-        if (timeStamp == 0) revert InvalidPrice();
-        if (block.timestamp - timeStamp > MAX_STALENESS) revert StalePrice();
-        if (roundId == 0 || answeredInRound == 0) revert InvalidPrice();
-        
-        return uint256(price);
-    } catch {
-        revert InvalidPrice();
-    }
+    (, int256 price, , uint256 updatedAt, ) = AggregatorV3Interface(priceFeed).latestRoundData();
+    
+    // NEW: Comprehensive validation
+    if (price <= 0) revert InvalidPrice();
+    if (block.timestamp - updatedAt > 3600) revert StalePrice(); // 1 hour staleness check
+    
+    return uint256(price);
 }
 ```
 
----
+**Key Innovation**: Multi-layer validation ensures price feed reliability.
 
-## 🧪 Comprehensive Testing Suite
+#### 7. Emergency Pause System (SECURITY FEATURE)
 
-### Testing Architecture
+**What**: Circuit breaker for emergency situations
+**Where**: `pause()` and `unpause()` functions (Lines ~1000-1020)
+**Why**: Production-ready security for handling unusual market conditions
 
-Our testing strategy follows **property-based testing** principles with **invariant validation**:
-
-```
-test/
-├── KipuBankV3Secure.t.sol          # Main test suite (24 tests)
-├── MockContracts/                  # Testing infrastructure
-│   ├── MockERC20.sol              # ERC20 token mock
-│   ├── MockPriceFeed.sol          # Chainlink oracle mock
-│   └── MockUniswapRouter.sol      # Uniswap V2 mock
-└── invariants/                     # Property-based tests
-    └── InvariantTests.t.sol       # Fuzzing & invariant validation
-```
-
-### Test Results Summary
-
-**Latest Test Run**: 29 tests executed
-- ✅ **Passed**: 9 tests (31%)
-- 🔴 **Failed**: 20 tests (69%)
-- ⏭️ **Skipped**: 0 tests
-
-### Critical Tests Status
-
-#### ✅ **Passing Security Tests**
-- `test_UserPauseProtection()` - Emergency user pause functionality
-- `test_ReceiveFunctionDeposit()` - Direct ETH deposit via receive()
-- `invariant_balanceConservation()` - Balance integrity maintained
-- `invariant_capacityLimit()` - Maximum capacity respected  
-- `invariant_solvency()` - Protocol remains solvent
-
-#### 🔴 **Failing Tests (Rate Limiting Issues)**
-
-The majority of test failures are due to **overly restrictive rate limiting** implementation:
-
-```
-[FAIL: OperationTooFrequent()] test_DepositETH_Success()
-[FAIL: OperationTooFrequent()] test_WithdrawUSDC_Success()
-[FAIL: OperationTooFrequent()] test_ReentrancyProtection()
-```
-
-**Root Cause**: Rate limiting triggers too early in test environment
-**Impact**: Functional tests cannot complete, but security properties are preserved
-**Status**: ⚠️ **Known Issue** - Rate limiting needs calibration for testing vs production
-
----
-
-## 📊 Test Coverage Analysis
-
-### Coverage Summary (Foundry)
-
-```bash
-forge coverage --report lcov
-```
-
-**Final Coverage Results**:
-
-| Component | Line Coverage | Function Coverage | Branch Coverage |
-|-----------|---------------|-------------------|-----------------|
-| **KipuBankV3Secure.sol** | 📊 **~85%** | 📊 **~90%** | 📊 **~75%** |
-| **Security Features** | 📊 **95%** | 📊 **100%** | 📊 **90%** |
-| **Core Business Logic** | 📊 **80%** | 📊 **85%** | 📊 **70%** |
-
-### Invariant Testing Results
-
-**Property-Based Tests**: 3 critical invariants validated
-- **Runs**: 256 sequences per invariant
-- **Calls**: 128,000 total function calls
-- **Reverts**: 85,206+ expected reverts (security working correctly)
-- **Success Rate**: 100% for invariant preservation
-
----
-
-## 🎯 Critical Invariants Validated ✅
-
-### 1. **Balance Conservation Invariant**
 ```solidity
-∀ state s: currentUSDCBalance == Σ(userDepositUSDC[user]) for all users
+function pause() external onlyOwner {
+    isPaused = true;
+    emit PauseStateChanged(true);
+}
+
+function unpause() external onlyOwner {
+    isPaused = false;
+    emit PauseStateChanged(false);
+}
 ```
-**Status**: ✅ **PASSING** (256/256 runs)
-**Criticality**: 🔴 **CRITICAL**
 
-### 2. **Capacity Limit Invariant**
-```solidity
-∀ transaction t: currentUSDCBalance ≤ MAX_CAP_USDC_EQUIVALENT
+**Key Innovation**: Simple but effective emergency control mechanism.
+
+### 🏗️ Architectural Decisions Explained
+
+#### Decision 1: USDC as Universal Base Currency
+**What**: Store all balances in USDC equivalent
+**Why**: 
+- Simplifies accounting across multiple tokens
+- Provides stable value reference
+- Reduces complexity in withdrawal calculations
+- Industry standard for DeFi protocols
+
+#### Decision 2: Immutable Core Contracts
+**What**: Price feeds and router addresses set at deployment
+**Why**:
+- Gas optimization (no SLOAD costs)
+- Security (prevents malicious address changes)
+- Trust (immutable infrastructure references)
+
+#### Decision 3: Checks-Effects-Interactions Pattern
+**What**: Validate inputs → Update state → External calls
+**Why**:
+- Reentrancy protection
+- State consistency
+- Security best practice
+
+#### Decision 4: Event-Driven Architecture
+**What**: Comprehensive event emission for all state changes
+**Why**:
+- Transparency for users and integrators
+- Off-chain monitoring capabilities
+- Audit trail for all operations
+
+### 🎯 TP4 Requirements Compliance Matrix
+
+| Requirement | Implementation | Location | Innovation |
+|-------------|----------------|----------|------------|
+| **Universal Token Support** | `depositToken()` with dynamic validation | Lines 400-500 | Real-time Uniswap pair checking |
+| **Automatic Swaps** | `_swapTokenToUSDC()` integration | Lines 600-700 | Conditional swap logic |
+| **Bank Cap Respect** | `_checkBankCapacity()` validation | Lines 300-350 | Pre-swap capacity verification |
+| **KipuBankV2 Preservation** | All original functions maintained | Throughout | Enhanced with new features |
+
+### 🔍 Code Quality Indicators
+
+1. **Gas Efficiency**: Optimized storage layout, minimal SLOAD operations
+2. **Security**: Comprehensive input validation, reentrancy protection
+3. **Modularity**: Clear function separation, reusable internal functions
+4. **Readability**: Detailed comments, consistent naming conventions
+5. **Testability**: View functions for all major state queries
+
+### Step-by-Step Testing Instructions
+
+#### 1. Initial Contract Verification
+```javascript
+// Check contract deployment
+getBankInfo()
+// Expected: currentUSDCBalance: 1, currentETHBalance: 1, currentCapUSDC: 1
 ```
-**Status**: ✅ **PASSING** (256/256 runs)
-**Criticality**: 🟡 **HIGH**
 
-### 3. **Solvency Invariant**
-```solidity
-∀ state s: contract_assets ≥ total_user_deposits
+#### 2. Test ETH Deposits (Core Functionality)
+```javascript
+// Test minimum ETH deposit
+depositETH() 
+// Send Value: 0.001 ETH
+// Expected: Convert ETH to USDC equivalent and update balance
 ```
-**Status**: ✅ **PASSING** (256/256 runs)
-**Criticality**: 🔴 **CRITICAL**
 
----
+#### 3. Test Token Configuration (New Feature)
+```javascript
+// Check ETH configuration
+getTokenConfig("0x0000000000000000000000000000000000000000")
+// Expected: isSupported: true, decimals: 18
 
-## 📋 Protocol Maturity Assessment
+// Check USDC configuration  
+getTokenConfig("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238")
+// Expected: isSupported: true, decimals: 6
+```
 
-### Rekt Test Evaluation
+#### 4. Test Uniswap Integration (New Feature)
+```javascript
+// Check USDC pair existence
+hasUniswapPair("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238")
+// Expected: true
 
-| Criterion | Original | Enhanced | Score |
-|-----------|----------|----------|--------|
-| **Documented actors and roles** | ❌ | 🟡 | 1/2 |
-| **External services documented** | ❌ | ✅ | 2/2 |
-| **Incident response plan** | ❌ | 🟡 | 1/2 |
-| **Attack vector documentation** | ❌ | ✅ | 2/2 |
-| **Multi-signature key management** | ❌ | 🟡 | 1/2 |
-| **Invariants defined and tested** | ❌ | ✅ | 2/2 |
-| **Automated security tools** | ❌ | 🟡 | 1/2 |
-| **User abuse mitigation** | ❌ | ✅ | 2/2 |
+// Preview swap (if testing with other tokens)
+getSwapPreview(tokenAddress, usdcAddress)
+// Expected: Returns expected USDC amount
+```
 
-**Enhanced Rekt Test Score: 12/16** - **🟡 IMPROVED TO DEVELOPMENT READY**
+#### 5. Test Bank Capacity Limits
+```javascript
+// Check current capacity
+getBankInfo()
+// Verify: currentCapUSDC shows current utilization
+// Maximum: 100 ETH equivalent in USDC
+```
 
----
+#### 6. Test User Balance
+```javascript
+// Check your balance
+balanceOf("YOUR_WALLET_ADDRESS")
+// Expected: Shows your USDC equivalent balance
+```
 
-## 🚀 Recommendations & Next Steps
+#### 7. Test Administrative Functions (Owner Only)
+```javascript
+// Add new token support (only owner)
+addToken(tokenAddress, decimals, priceFeedAddress)
 
-### Immediate Actions (Week 1-2)
-1. **🔧 Rate Limiting Calibration**: Adjust rate limits for better UX
-2. **🧪 Test Suite Fixes**: Resolve test environment configuration  
-3. **📊 Coverage Improvement**: Target 95%+ line coverage
-4. **🔍 Static Analysis**: Integrate Slither for automated scanning
+// Remove token support (only owner)  
+removeToken(tokenAddress)
 
-### Pre-Audit Phase (Week 3-6)
-1. **🔐 Multi-sig Implementation**: Replace single owner with Gnosis Safe
-2. **🎯 Oracle Redundancy**: Add TWAP validation from Uniswap
-3. **⛽ Gas Optimization**: Reduce deployment and operation costs
-4. **📚 Documentation**: Complete architecture and API documentation
+// Emergency pause (only owner)
+pause()
+unpause()
+```
 
-### Production Readiness (Month 2-3)
-1. **🔒 Professional Audit**: Engage recognized security auditor
-2. **🐛 Bug Bounty**: Launch community security testing program  
-3. **📊 Monitoring**: Deploy real-time security monitoring
-4. **🚀 Gradual Rollout**: Testnet → Limited Mainnet → Full Production
+### Quick Test Sequence
+1. **Deploy Verification**: Call `getBankInfo()`
+2. **ETH Deposit**: Send 0.001 ETH to `depositETH()`
+3. **Balance Check**: Call `balanceOf(yourAddress)`
+4. **Token Check**: Call `getTokenConfig(zeroAddress)` for ETH
+5. **Capacity Check**: Verify bank limits with `getBankInfo()`
 
----
-
-## 🛠️ Development Setup
+## 🔧 Deployment Instructions
 
 ### Prerequisites
-```bash
-# Install Foundry
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
+- Solidity 0.8.26
+- Sepolia ETH for gas fees
+- Access to Remix IDE or Foundry/Hardhat
+
+### Constructor Parameters (Sepolia)
+```solidity
+constructor(
+    address initialOwner,     // 0x4829f4f3aadee47cb1cc795b2ec78a166042e918 (Your wallet)
+    address ethPriceFeed,     // 0x694AA1769357215DE4FAC081bf1f309aDC325306 (Chainlink ETH/USD)
+    address usdcAddress,      // 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238 (USDC Sepolia)
+    address usdcPriceFeed,    // 0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E (Chainlink USDC/USD)
+    address uniswapRouter     // 0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008 (SushiSwap Router)
+)
 ```
 
-### Quick Start
-```bash
-# Clone project
-git clone <repository-url>
-cd Trabajo_Practico5
-
-# Install dependencies  
-forge install
-
-# Run enhanced security tests
-forge test --match-contract KipuBankV3SecureTest -vv
-
-# Generate coverage report
-forge coverage --report lcov
-
-# Run invariant tests
-forge test --match-contract KipuBankV3InvariantTest
+### ABI-Encoded Constructor Arguments
+For Etherscan verification, the ABI-encoded arguments used for deployment:
+```
+0000000000000000000000004829f4f3aadee47cb1cc795b2ec78a166042e918000000000000000000000000694aa1769357215de4fac081bf1f309adc3253060000000000000000000000001c7d4b196cb0c7b01d743fbc6116a902379c7238000000000000000000000000a2f78ab2355fe2f984d808b5cee7fd0a93d5270e000000000000000000000000c532a74256d3db42d0bf7a0400fefdbad7694008
 ```
 
-### Key Test Commands
-```bash
-# Security-focused test run
-forge test --match-test "test_.*Security.*|test_.*Protection.*" -vvv
-
-# Invariant validation
-forge test --match-test "invariant_.*" -vvv
-
-# Gas optimization analysis  
-forge test --gas-report
+### Actual Deployment Parameters Used
+```
+Parameter 1 (initialOwner): 0x4829f4f3aadee47cb1cc795b2ec78a166042e918
+Parameter 2 (ethPriceFeed): 0x694AA1769357215DE4FAC081bf1f309aDC325306  
+Parameter 3 (usdcAddress): 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+Parameter 4 (usdcPriceFeed): 0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E
+Parameter 5 (uniswapRouter): 0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008 (SushiSwap)
 ```
 
----
+### Deployment Steps
+1. Compile with Solidity 0.8.26
+2. Set gas limit to 5,000,000
+3. Deploy with constructor parameters
+4. Verify on Etherscan
+5. Initialize token support with `initializeTokens()`
 
-## 💡 Educational Insights & Learning Outcomes
+### ✅ Successful Deployment Verification
+**Deployed Contract**: Successfully deployed to Sepolia at `0xF8eD172b29c2CF2037b2d6A5C611C1cD26AbbA9e`  
+**Router Used**: SushiSwap Router (`0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008`) - Alternative to Uniswap V2  
+**Verification**: Contract verified on Sepolia Etherscan with matching bytecode and ABI  
+**Etherscan Verification**: Successfully generated matching Bytecode and ABI
 
-### Module 5 Methodology Applied ✅
+## 🚀 Improvements Over KipuBankV2
 
-#### **Three Perspectives Testing Mindset**
-1. **🏗️ System Architecture**: Analyzed external dependencies and failure modes
-2. **🔒 Invariant Properties**: Defined and validated critical protocol properties  
-3. **⚔️ Adversarial Thinking**: Simulated realistic attack scenarios
+### Enhanced Features Added for TP4
 
-#### **OWASP Top 10 (2025) Coverage**
-- **SC02** Oracle Manipulation → Circuit breakers implemented
-- **SC05** Reentrancy → ReentrancyGuard protection  
-- **SC10** DoS Attacks → Rate limiting and validation
-- **SC08** Arithmetic Errors → Solidity 0.8.x + validation
+1. **Universal Token Support**
+   - **Before**: Only ETH and USDC
+   - **Now**: Any ERC20 token with Uniswap V2 pairs
+   - **Benefit**: Massive expansion of supported assets
 
-#### **DevSecOps Implementation**
-- **Security-First Design**: Threat modeling from conception
-- **Automated Testing**: Continuous security validation
-- **Comprehensive Documentation**: Professional security analysis
+2. **Automatic Swap Integration**
+   - **Before**: Manual token handling
+   - **Now**: Seamless Uniswap V2 integration
+   - **Benefit**: True DeFi composability
 
----
+3. **Dynamic Token Management**
+   - **Before**: Fixed token support
+   - **Now**: Add/remove tokens dynamically
+   - **Benefit**: Flexible ecosystem adaptation
 
-## 🎓 Academic Achievement Summary
+4. **Advanced Security**
+   - **Before**: Basic protections
+   - **Now**: Emergency pause, comprehensive validations
+   - **Benefit**: Production-ready security
 
-### Assignment Deliverables ✅
+5. **Gas Optimization**
+   - **Before**: Standard operations
+   - **Now**: Optimized storage, efficient swaps
+   - **Benefit**: Lower transaction costs
 
-| Requirement | Status | Evidence Location |
-|-------------|--------|-------------------|
-| **Protocol Understanding** | ✅ | Architecture Overview section |
-| **Maturity Evaluation** | ✅ | Rekt Test: 12/16 score improvement |
-| **3+ Attack Vectors** | ✅ | 4 detailed threat scenarios with POCs |
-| **3+ Protocol Invariants** | ✅ | 3 critical invariants with formal specs |
-| **Impact Analysis** | ✅ | Comprehensive threat impact assessment |
-| **Validation Recommendations** | ✅ | Testing strategy and tool recommendations |
-| **Production Roadmap** | ✅ | Phase-based deployment plan |
+6. **Enhanced User Experience**
+   - **Before**: Limited functionality
+   - **Now**: Swap previews, detailed status information
+   - **Benefit**: Better user interface support
 
-### Learning Demonstration
+## 🔒 Security Considerations
 
-This project bridges the gap between **"academic exercise"** and **"professional security practice"** by:
+- **Reentrancy Protection**: Checks-Effects-Interactions pattern
+- **Price Feed Validation**: Chainlink staleness and validity checks
+- **Slippage Protection**: Built-in swap validation
+- **Access Control**: Owner-only administrative functions
+- **Emergency Pause**: Circuit breaker for unusual situations
+- **Input Validation**: Comprehensive parameter checking
 
-- Applying **real-world threat modeling** methodologies
-- Implementing **industry-standard security patterns**  
-- Creating **production-grade testing infrastructure**
-- Documenting findings with **audit-ready thoroughness**
+## 📈 Design Decisions & Trade-offs
 
----
+### 1. USDC as Base Currency
+- **Decision**: All balances stored in USDC equivalent
+- **Benefit**: Simplified accounting, stable value reference
+- **Trade-off**: Requires conversion for ETH withdrawals
 
-## ⚠️ Known Limitations & Future Work
+### 2. Uniswap V2 Integration
+- **Decision**: Use established V2 router
+- **Benefit**: Reliable, well-tested protocol
+- **Trade-off**: V2 vs V3 features (concentrated liquidity)
 
-### Current State Assessment
+### 3. Immutable Core Addresses
+- **Decision**: Price feeds and router as immutable
+- **Benefit**: Gas optimization, security
+- **Trade-off**: Requires redeployment for address changes
 
-**Strengths** 💪
-- Comprehensive threat identification and mitigation
-- Strong invariant testing with property-based validation
-- Professional documentation and analysis methodology
-- Enhanced security features successfully implemented
+### 4. Dynamic Token Support
+- **Decision**: Admin-controlled token addition
+- **Benefit**: Flexibility for ecosystem growth
+- **Trade-off**: Centralized control requirement
 
-**Limitations** 🚧
-- Rate limiting calibration needed for optimal UX
-- Test suite requires refinement for full coverage
-- Oracle redundancy implementation pending
-- Multi-signature governance not yet implemented
+## 📄 License
 
-**Next Evolution** 🚀
-- Advanced oracle integration (multiple providers)
-- Decentralized governance implementation
-- Cross-chain compatibility planning
-- MEV protection mechanisms
+MIT License - See LICENSE file for details
 
----
+## 🤝 Contributing
 
-## 📞 Contact & Acknowledgments
-
-**👨‍💻 Author**: Eduardo Moreno  
-**🎓 Program**: Ethereum Developers ETH_KIPU  
-**📚 Module**: 5 - Introduction to Audit Preparation  
-**📅 Academic Year**: 2025-S2-EDP-HENRY-M5  
-
-**🔐 Security Contact**: security@kipubank.com *(Academic simulation)*
-
-### Special Thanks 🙏
-- **ETH_KIPU Program** - World-class blockchain security education
-- **OpenZeppelin** - Secure smart contract foundations
-- **OWASP** - Smart contract security framework
-- **Trail of Bits** - Security tooling and research inspiration
+This is an academic project for educational purposes. For suggestions or improvements, please open an issue.
 
 ---
 
-## 📜 License
-
-MIT License - Educational and research purposes
-
----
-
-*"This project demonstrates that security isn't just about writing code that works—it's about building systems that survive in adversarial environments. The methodologies learned in Module 5 transform developers from code writers into security-conscious protocol architects."*
-
-**🛡️ Security is not a feature to be added later—it's a mindset that shapes every design decision.**
+**KipuBankV3** - Advanced DeFi Banking with Uniswap Integration  
+*Developed by Eduardo Moreno as Final Project for Module 4 - Ethereum Development Program*
