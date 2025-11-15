@@ -9,6 +9,96 @@
 
 **KipuBankV3** is an advanced DeFi banking system that implements ETH/USDC deposits and withdrawals with Uniswap V2 integration for automatic swaps and Chainlink oracles for reliable pricing. This project represents a comprehensive security analysis following the **Module 5: Audit Preparation** methodology and the **OWASP Smart Contract Top 10 (2025)**.
 
+## 🔍 How KipuBankV3 Works
+
+### Core Concept
+
+KipuBankV3 operates as a **decentralized banking protocol** that accepts ETH deposits and manages user balances denominated in USDC. The protocol uses Chainlink price oracles to convert deposited ETH into USDC-equivalent credits, which users can later withdraw as ETH or USDC.
+
+### Key Components
+
+1. **Deposit Mechanism**
+   - Users deposit ETH through `depositETH()`
+   - Protocol queries Chainlink ETH/USD price feed in real-time
+   - Converts ETH amount to USDC equivalent using the formula:
+     ```
+     USDC Amount = (ETH Amount × ETH Price) / 10^20
+     ```
+   - Credits user's internal balance in USDC (6 decimals)
+   - Updates total bank capacity and ETH reserves
+
+2. **Withdrawal System**
+   - Users can withdraw via `withdrawETH()` or `withdrawUSDC()`
+   - **ETH Withdrawal**: Converts USDC balance back to ETH using current price
+   - **USDC Withdrawal**: Direct withdrawal of USDC balance
+   - Enforces daily withdrawal limit of 20,000 USDC per user
+   - Uses Checks-Effects-Interactions pattern to prevent reentrancy
+
+3. **Oracle Integration (Chainlink)**
+   - Provides real-time ETH/USD pricing (8 decimals precision)
+   - Validates price data (price > 0, updatedAt exists)
+   - Used for both deposit and withdrawal conversions
+   - **Vulnerability**: Single oracle dependency (no redundancy)
+
+4. **Capacity Management**
+   - Maximum capacity: 100,000 USDC
+   - Prevents over-exposure to risk
+   - Tracks total deposits across all users
+   - Reverts deposits that exceed capacity limit
+
+5. **Security Controls**
+   - **ReentrancyGuard**: Prevents reentrancy attacks on fund transfers
+   - **Ownable**: Access control for administrative functions
+   - **Pausable**: Emergency pause mechanism for incident response
+   - **Input Validation**: Zero amount and zero address checks
+
+### Transaction Flow Example
+
+**Deposit Flow:**
+```
+1. User calls depositETH{value: 1 ETH}
+2. Contract checks: not paused, amount > 0
+3. Queries Chainlink: ETH price = $2,000
+4. Calculates: 1 ETH × $2,000 = 2,000 USDC credit
+5. Validates: capacity not exceeded, within limits
+6. Updates: user balance += 2,000 USDC
+7. Updates: total capacity += 2,000 USDC
+8. Emits: Deposit event
+```
+
+**Withdrawal Flow:**
+```
+1. User calls withdrawETH(2000 USDC)
+2. Contract checks: not paused, sufficient balance
+3. Checks: daily withdrawal limit not exceeded
+4. Queries Chainlink: ETH price = $2,000
+5. Calculates: 2,000 USDC / $2,000 = 1 ETH to withdraw
+6. Updates: user balance -= 2,000 USDC (Effects)
+7. Transfers: 1 ETH to user (Interaction)
+8. Updates: daily withdrawal counter
+9. Emits: Withdrawal event
+```
+
+### State Management
+
+The protocol maintains several critical state variables:
+
+- `userDepositUSDC[address]`: Individual user balances in USDC
+- `currentCapUSDC`: Total USDC-equivalent capacity used
+- `currentETHBalance`: Total ETH held in contract
+- `dailyWithdrawn[address][day]`: Daily withdrawal tracking
+- `lastWithdrawalDay[address]`: Last withdrawal timestamp
+- `isPaused`: Emergency pause state
+
+### Mathematical Invariants
+
+The protocol enforces these mathematical invariants:
+
+1. **Balance Conservation**: `Σ(user balances) ≤ contract ETH + USDC value`
+2. **Capacity Limit**: `currentCapUSDC ≤ 100,000 USDC`
+3. **Daily Limit**: `dailyWithdrawn[user][day] ≤ 20,000 USDC`
+4. **Non-negative Balances**: `userDepositUSDC[user] ≥ 0` (enforced by Solidity 0.8+)
+
 ## ✨ Features
 
 - 💰 **ETH Deposits**: Deposit ETH and receive USDC credit based on real-time prices
