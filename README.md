@@ -343,7 +343,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Ethereum Developer - Security Researcher
 
 - GitHub: [@edumor](https://github.com/edumor)
-- LinkedIn: [Eduardo Moreno](https://linkedin.com/in/eduardo-moreno)
+- LinkedIn: [Eduardo Moreno](linkedin.com/in/eduardomoreno-15813b19b)
 
 **Course**: TP5 - Module 5  
 **Program**: Ethereum Developer Pack - KIPU 2025
